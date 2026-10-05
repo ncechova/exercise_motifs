@@ -2,6 +2,7 @@ from Bio import motifs
 from Bio.Seq import Seq
 import random
 from Bio import SeqIO
+import pandas as pd
 
 lecture_dna = [
     "TGACGTATAAGTTGCGATGGACGAGATAGCAGAGAATAGGCAACGAGAGATAAGCAG",
@@ -166,7 +167,7 @@ class MotifFinder:
         """
         self.sequences = sequences
         self.l = l
-        self.rnq = random.Random(seed)  # a random number generator with a seed for reproducibility
+        self.rng = random.Random(seed)  # a random number generator with a seed for reproducibility
         self.windows = [[sequence[i:i+self.l] for i in range(len(sequence) - self.l + 1)] for sequence in self.sequences]
 
     def total_distance(self, pattern):
@@ -208,7 +209,7 @@ class MotifFinder:
         # pick a random l-mer in every sequence (self.rng.choice over its windows) → this is the current motif matrix;
         lmers = []
         for window in self.windows:
-            lmers.append(self.rnq.choice(window))
+            lmers.append(self.rng.choice(window))
         while True:
             # build a MotifProfile from the current motifs (pseudocount 1)
             profile = MotifProfile(lmers, pseudocount=1)
@@ -282,14 +283,76 @@ if __name__ == "__main__":
     # lmer = rng.choice(["ACG", "CGT", "GTA"])   # one random item of a list
     # print(i, lmer)
 
+    # check on the lecture data:
+    # lect_motif = MotifFinder(lecture_dna, 6)
+    # print(lect_motif.median_string())  # "AGATAG",2
+    # print(lect_motif.best_of(100))      # ['AGATAG', 'AGATAG', 'AGATAG', 'AGACAG', 'AGATAG', 'AGGTAG'], 34
+    
+    # find the planted motif:
     sequences = [str(record.seq) for record in SeqIO.parse("planted_motif.fasta", "fasta")]
     motif = MotifFinder(sequences, 7)
-    # print(len(motif.windows), len(motif.windows[0])) 
 
-    # check on the lecture data:
-    lect_motif = MotifFinder(lecture_dna, 6)
-    print(lect_motif.median_string())  # "AGATAG",2
-    print(lect_motif.best_of(100))      # ['AGATAG', 'AGATAG', 'AGATAG', 'AGACAG', 'AGATAG', 'AGGTAG'], 34
-    # find the planted motif:
-    print(motif.median_string())
-    print(motif.best_of(100))  
+         # (['GCTACAG', 'GCTCAAG', 'ACTAAAG', 'GCTAATG', 'GATAAAG', 'GCTATAG', 'GATAAAG', 'TCTAAAG', 'GCTACAG', 'GCTAAGG'], 60)
+    
+    _, best_score = motif.best_of(200)
+    # How many restarts do you need?
+    median_pattern, _ = motif.median_string()
+    N_trials = 50
+    Rs = [5,10,20,50]
+    successes = {R:{"measured_success_rate":0.0, "predicted_success_rate":0.0} for R in Rs}
+    p_runs = 200
+    ps = 0
+    for _ in range(N_trials):
+        if consensus(motif.randomized_search()[0]) == median_pattern:
+            ps += 1
+    p1 = ps / N_trials
+
+    for R in Rs:
+        succeed_count = 0
+        for _ in range(N_trials):
+            # print(f"best_of({R}): {motif.best_of(R)[1]}")
+            if motif.best_of(R)[1] == best_score:
+                succeed_count += 1
+        successes[R]["measured_success_rate"] = succeed_count / N_trials
+        successes[R]["predicted_success_rate"] = 1 - (1 - p1) ** R
+    table = pd.DataFrame(successes)
+    print(table)
+    #                             5         10        20        50
+    # measured_success_rate   0.220000  0.280000  0.500000  0.900000
+    # predicted_success_rate  0.167498  0.306941  0.519669  0.840099
+
+    # From the found motif to a scanner.
+    best_motifs, _ = motif.best_of(100)
+    found = motifs.create([Seq(m) for m in best_motifs])  # the motifs from best_of(100)
+    found.pseudocounts = 1
+    pssm = found.pssm
+
+    n_windows = sum(len(w) for w in motif.windows)  # 10 * 54 = 540 per strand
+
+    for fpr in (0.01, 0.001):
+        threshold = pssm.distribution().threshold_fpr(fpr)
+        total_hits = 0
+        n_found = 0
+        n_reverse = 0
+        print(f"--- threshold_fpr({fpr}), score {threshold:.2f} ---")
+        for idx, sequence in enumerate(sequences):
+            for position, hit_score in pssm.search(Seq(sequence), threshold=threshold):
+                total_hits += 1
+                if position < 0:
+                    # reverse strand: the window is on the forward strand at this place,
+                    # and the motif matches its reverse complement
+                    n_reverse += 1
+                    start = len(sequence) + position
+                else:
+                    start = position
+                    if sequence[start:start + motif.l] == best_motifs[idx]:
+                        n_found += 1
+                window = sequence[start:start + motif.l]
+                strand = "-" if position < 0 else "+"
+                print(f"seq {idx}: {strand} pos {start}, score {hit_score:.2f}, {window}")
+        expected = 2 * n_windows * fpr  # both strands
+        print(f"hits={total_hits}, found sites={n_found}, "
+              f"reverse strand={n_reverse}, expected by chance={expected:.1f}")
+
+        # expected results table:
+        
