@@ -1,5 +1,7 @@
 from Bio import motifs
 from Bio.Seq import Seq
+import random
+from Bio import SeqIO
 
 lecture_dna = [
     "TGACGTATAAGTTGCGATGGACGAGATAGCAGAGAATAGGCAACGAGAGATAAGCAG",
@@ -152,8 +154,88 @@ class MotifProfile:
                     best_nucleotide = nucleotide
             consensus += best_nucleotide
         return consensus
- 
 
+
+class MotifFinder:
+    def __init__(self, sequences, l, seed=None):
+        """
+        sequences: a list of strings
+        l: length of the motif to find
+        windows: a list with one list of l-mers per sequence: every sequence cut into all its l-mers once
+        rnq: a random number generator with a seed for reproducibility
+        """
+        self.sequences = sequences
+        self.l = l
+        self.rnq = random.Random(seed)  # a random number generator with a seed for reproducibility
+        self.windows = [[sequence[i:i+self.l] for i in range(len(sequence) - self.l + 1)] for sequence in self.sequences]
+
+    def total_distance(self, pattern):
+        """
+        pattern: a string of length l
+        returns: int, like total_distance from Task 1, but using self.windows
+        """
+        total_distance = 0
+        for window_list in self.windows:
+            min_distance = self.l
+            for window in window_list:
+                distance = hamming_distance(pattern, window)
+                if distance < min_distance:
+                    min_distance = distance
+            total_distance += min_distance
+        return total_distance
+
+    def median_string(self):
+        """
+        returns: the pattern with the smallest total distance out of all 4^l patterns of length l, together with that distance
+        """
+        best_pattern = None
+        best_distance = self.l * len(self.sequences)  # maximum possible distance
+        for i in range(4 ** self.l):
+            pattern = ""
+            for _ in range(self.l):
+                pattern = "ACGT"[i % 4] + pattern
+                i //= 4
+            distance = self.total_distance(pattern)
+            if distance < best_distance:
+                best_distance = distance
+                best_pattern = pattern
+        return best_pattern, best_distance
+
+    def randomized_search(self):
+        """
+        returns: the result of one run of randomized motif search
+        """
+        # pick a random l-mer in every sequence (self.rng.choice over its windows) → this is the current motif matrix;
+        lmers = []
+        for window in self.windows:
+            lmers.append(self.rnq.choice(window))
+        while True:
+            # build a MotifProfile from the current motifs (pseudocount 1)
+            profile = MotifProfile(lmers, pseudocount=1)
+            # in every sequence, take the profile-most-probable l-mer (most_probable_lmer) → new motifs
+            new_motifs = []
+            for sequence in self.sequences:
+                new_motifs.append(profile.most_probable_lmer(sequence))
+
+            # if the new motifs have a higher score (Task 1), keep them and go back to step 2; otherwise stop and return the current motifs and their score
+            if score(new_motifs) > score(lmers):
+                lmers = new_motifs
+            else:
+                return lmers, score(lmers)
+
+    def best_of(self, runs):
+        """
+        runs: int, number of runs of randomized motif search
+        returns: the best motifs and their score out of all runs
+        """
+        best_motifs = None
+        best_score = 0
+        for _ in range(runs):
+            motifs, motifs_score = self.randomized_search()
+            if motifs_score > best_score:
+                best_score = motifs_score
+                best_motifs = motifs
+        return best_motifs, best_score
 
 if __name__ == "__main__":
     # counts = count_matrix(lecture_dna)
@@ -181,17 +263,33 @@ if __name__ == "__main__":
     # print(profile.consensus()) # "ATGCGTA"
 
 
-    # check:
-    profile = MotifProfile(["ATCCGTA", "GTGCATA", "AAGCGTA", "ATGCGTG"])
-    print(profile.consensus())                       # ATGCGTA
-    print(round(profile.lmer_probability("ATGCGTA"), 4))  # 0.0122
+    # # check:
+    # profile = MotifProfile(["ATCCGTA", "GTGCATA", "AAGCGTA", "ATGCGTG"])
+    # print(profile.consensus())                       # ATGCGTA
+    # print(round(profile.lmer_probability("ATGCGTA"), 4))  # 0.0122
 
-    two = MotifProfile(["GTAC", "TTAA"])
-    print(two.most_probable_lmer("ACTGGATGACCC"))    # TGAC
-    print(round(two.lmer_probability("TGAC"), 4))         # 0.0093
+    # two = MotifProfile(["GTAC", "TTAA"])
+    # print(two.most_probable_lmer("ACTGGATGACCC"))    # TGAC
+    # print(round(two.lmer_probability("TGAC"), 4))         # 0.0093
 
-    bio = motifs.create([Seq(site) for site in ["ATCCGTA", "GTGCATA", "AAGCGTA", "ATGCGTG"]])
-    bio.pseudocounts = 1
-    print(bio.consensus)     # ATGCGTA
-    print(bio.pwm["A"])      # the same numbers as your profile.ppm["A"]
-    print(profile.ppm["A"]) 
+    # bio = motifs.create([Seq(site) for site in ["ATCCGTA", "GTGCATA", "AAGCGTA", "ATGCGTG"]])
+    # bio.pseudocounts = 1
+    # print(bio.consensus)     # ATGCGTA
+    # print(bio.pwm["A"])      # the same numbers as your profile.ppm["A"]
+
+    # rng = random.Random(1)                 # a random number generator with seed 1
+    # i = rng.randint(0, 50)                 # random integer, 0 <= i <= 50 (both ends included!)
+    # lmer = rng.choice(["ACG", "CGT", "GTA"])   # one random item of a list
+    # print(i, lmer)
+
+    sequences = [str(record.seq) for record in SeqIO.parse("planted_motif.fasta", "fasta")]
+    motif = MotifFinder(sequences, 7)
+    # print(len(motif.windows), len(motif.windows[0])) 
+
+    # check on the lecture data:
+    lect_motif = MotifFinder(lecture_dna, 6)
+    print(lect_motif.median_string())  # "AGATAG",2
+    print(lect_motif.best_of(100))      # ['AGATAG', 'AGATAG', 'AGATAG', 'AGACAG', 'AGATAG', 'AGGTAG'], 34
+    # find the planted motif:
+    print(motif.median_string())
+    print(motif.best_of(100))  
