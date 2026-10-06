@@ -163,7 +163,7 @@ class MotifFinder:
         sequences: a list of strings
         l: length of the motif to find
         windows: a list with one list of l-mers per sequence: every sequence cut into all its l-mers once
-        rnq: a random number generator with a seed for reproducibility
+        rng: a random number generator with a seed for reproducibility
         """
         self.sequences = sequences
         self.l = l
@@ -238,7 +238,94 @@ class MotifFinder:
                 best_motifs = motifs
         return best_motifs, best_score
 
+def evaluate(sequences, l, p_runs=200, n_trials=50, R=50):
+    """Returns (finder, median string, dict with one column of the first table)."""
+    finder = MotifFinder(sequences, l)
+    med_pattern, med_distance = finder.median_string()
+
+    def success(run_motifs):
+        return consensus(run_motifs) == med_pattern
+
+    p = sum(success(finder.randomized_search()[0]) for _ in range(p_runs)) / p_runs
+    rate = sum(success(finder.best_of(R)[0]) for _ in range(n_trials)) / n_trials
+    return finder, med_pattern, {
+        "median string": med_pattern,
+        "total distance": med_distance,
+        "best score (= t * l - total distance)": len(sequences) * l - med_distance,
+        "p, one randomized run": f"{p:.1%}",
+        f"best_of({R}) succeeds": f"{rate:.1%}",
+    }
+
+
+def scan_summary(pssm, finder, best_motifs, fpr):
+    """Scans all sequences on both strands, returns one row of the second table."""
+    threshold = pssm.distribution().threshold_fpr(fpr)
+    total = n_found = n_reverse = 0
+    for idx, sequence in enumerate(finder.sequences):
+        for position, hit_score in pssm.search(Seq(sequence), threshold=threshold):
+            total += 1
+            if position < 0:
+                n_reverse += 1
+            elif sequence[position:position + finder.l] == best_motifs[idx]:
+                n_found += 1
+    n_windows = sum(len(w) for w in finder.windows)  # per strand
+    return {
+        "threshold": f"threshold_fpr({fpr})",
+        "score": round(threshold, 1),
+        "hits": total,
+        "found sites among them": n_found,
+        "on the reverse strand": n_reverse,
+        "expected by chance": round(2 * n_windows * fpr),
+    }
+
+
 if __name__ == "__main__":
+    # expected results table:
+    _, _, lecture_col = evaluate(lecture_dna, 6)
+
+    sequences = [str(record.seq) for record in SeqIO.parse("planted_motif.fasta", "fasta")]
+    motif, med_pattern, planted_col = evaluate(sequences, 7)
+
+    print("Expected result:")
+    print(pd.DataFrame({
+        "lecture data (l = 6)": lecture_col,
+        "planted_motif.fasta (l = 7)": planted_col,
+    }).to_string())
+
+    # step 2: the l-mers picked by best_of(100) and their consensus
+    best_motifs, best_score = motif.best_of(100)
+    print(best_motifs, best_score)
+    print(consensus(best_motifs), "vs", med_pattern)
+    # Do they agree? Yes: the consensus of the picked l-mers equals the median string.
+
+    # step 3: how many restarts do you need?
+    p_runs = 200
+    N_trials = 50
+    p = sum(consensus(motif.randomized_search()[0]) == med_pattern for _ in range(p_runs)) / p_runs
+    rows = []
+    for R in [5, 10, 20, 50]:
+        measured = sum(consensus(motif.best_of(R)[0]) == med_pattern for _ in range(N_trials)) / N_trials
+        rows.append({"R": R, "measured": measured, "predicted": 1 - (1 - p) ** R})
+    print(f"p = {p:.3f}")
+    print(pd.DataFrame(rows).to_string(index=False))
+    # Why does a single run fail so often? The search is greedy: it only accepts
+    # improvements, so from a bad random start it gets stuck in a local maximum.
+    # Restarts are the only way out.
+
+    # step 4: from the found motif to a scanner
+    found = motifs.create([Seq(m) for m in best_motifs])  # the motifs from best_of(100)
+    found.pseudocounts = 1
+    pssm = found.pssm
+
+    print("\nScanning planted_motif.fasta with the PSSM of the planted sites:")
+    rows = [scan_summary(pssm, motif, best_motifs, fpr) for fpr in (0.01, 0.001)]
+    print(pd.DataFrame(rows).to_string(index=False))
+    # Expected by chance = 2 strands * 540 windows * fpr (about 11 at 0.01, about 1 at 0.001).
+    # At 0.01 the hits beyond the found sites are about as many as chance predicts,
+    # so they are most likely false positives. At 0.001 only the found sites remain,
+    # so using 0.001 seems to be better to report binding sites.
+
+
     # counts = count_matrix(lecture_dna)
     # print(count_matrix(["ACGT", "ATGT", "CCGA"]))
     # print(score(["ACGT", "ATGT", "CCGA"]))
@@ -287,72 +374,3 @@ if __name__ == "__main__":
     # lect_motif = MotifFinder(lecture_dna, 6)
     # print(lect_motif.median_string())  # "AGATAG",2
     # print(lect_motif.best_of(100))      # ['AGATAG', 'AGATAG', 'AGATAG', 'AGACAG', 'AGATAG', 'AGGTAG'], 34
-    
-    # find the planted motif:
-    sequences = [str(record.seq) for record in SeqIO.parse("planted_motif.fasta", "fasta")]
-    motif = MotifFinder(sequences, 7)
-
-         # (['GCTACAG', 'GCTCAAG', 'ACTAAAG', 'GCTAATG', 'GATAAAG', 'GCTATAG', 'GATAAAG', 'TCTAAAG', 'GCTACAG', 'GCTAAGG'], 60)
-    
-    _, best_score = motif.best_of(200)
-    # How many restarts do you need?
-    median_pattern, _ = motif.median_string()
-    N_trials = 50
-    Rs = [5,10,20,50]
-    successes = {R:{"measured_success_rate":0.0, "predicted_success_rate":0.0} for R in Rs}
-    p_runs = 200
-    ps = 0
-    for _ in range(N_trials):
-        if consensus(motif.randomized_search()[0]) == median_pattern:
-            ps += 1
-    p1 = ps / N_trials
-
-    for R in Rs:
-        succeed_count = 0
-        for _ in range(N_trials):
-            # print(f"best_of({R}): {motif.best_of(R)[1]}")
-            if motif.best_of(R)[1] == best_score:
-                succeed_count += 1
-        successes[R]["measured_success_rate"] = succeed_count / N_trials
-        successes[R]["predicted_success_rate"] = 1 - (1 - p1) ** R
-    table = pd.DataFrame(successes)
-    print(table)
-    #                             5         10        20        50
-    # measured_success_rate   0.220000  0.280000  0.500000  0.900000
-    # predicted_success_rate  0.167498  0.306941  0.519669  0.840099
-
-    # From the found motif to a scanner.
-    best_motifs, _ = motif.best_of(100)
-    found = motifs.create([Seq(m) for m in best_motifs])  # the motifs from best_of(100)
-    found.pseudocounts = 1
-    pssm = found.pssm
-
-    n_windows = sum(len(w) for w in motif.windows)  # 10 * 54 = 540 per strand
-
-    for fpr in (0.01, 0.001):
-        threshold = pssm.distribution().threshold_fpr(fpr)
-        total_hits = 0
-        n_found = 0
-        n_reverse = 0
-        print(f"--- threshold_fpr({fpr}), score {threshold:.2f} ---")
-        for idx, sequence in enumerate(sequences):
-            for position, hit_score in pssm.search(Seq(sequence), threshold=threshold):
-                total_hits += 1
-                if position < 0:
-                    # reverse strand: the window is on the forward strand at this place,
-                    # and the motif matches its reverse complement
-                    n_reverse += 1
-                    start = len(sequence) + position
-                else:
-                    start = position
-                    if sequence[start:start + motif.l] == best_motifs[idx]:
-                        n_found += 1
-                window = sequence[start:start + motif.l]
-                strand = "-" if position < 0 else "+"
-                print(f"seq {idx}: {strand} pos {start}, score {hit_score:.2f}, {window}")
-        expected = 2 * n_windows * fpr  # both strands
-        print(f"hits={total_hits}, found sites={n_found}, "
-              f"reverse strand={n_reverse}, expected by chance={expected:.1f}")
-
-        # expected results table:
-        
